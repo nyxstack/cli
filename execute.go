@@ -27,18 +27,29 @@ func (c *Command) ExecuteWithArgs(args []string) error {
 
 // execute is the internal execution logic
 func (c *Command) execute(ctx context.Context, args []string) error {
-	// Check for help flag first - find which command needs help
+	// Separate flags from non-flag arguments
+	var flags []string
+	var nonFlags []string
+
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+		} else {
+			nonFlags = append(nonFlags, arg)
+		}
+	}
+
+	// Check for help flag first
 	if c.helpEnabled {
-		for _, arg := range args {
-			if arg == "--"+c.helpFlag || arg == "-"+c.helpShort {
-				// Find which command the help is for
+		for _, flag := range flags {
+			if flag == "--"+c.helpFlag || flag == "-"+c.helpShort {
+				// Find which command the help is for by looking at non-flag args
 				targetCmd := c
-				for _, a := range args {
-					if !strings.HasPrefix(a, "-") {
-						if cmd, exists := c.subcommands[a]; exists {
-							targetCmd = cmd
-							break
-						}
+				for _, a := range nonFlags {
+					if cmd, exists := targetCmd.subcommands[a]; exists {
+						targetCmd = cmd
+					} else {
+						break
 					}
 				}
 				targetCmd.showHelp()
@@ -47,62 +58,48 @@ func (c *Command) execute(ctx context.Context, args []string) error {
 		}
 	}
 
-	// First, find if there's a subcommand in the args
+	// Find if there's a subcommand in the non-flag args
 	subcommandIndex := -1
 	var subcmd *Command
 
-	for i, arg := range args {
-		// Skip flags (all flags start with - or --)
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-
+	if len(nonFlags) > 0 {
+		arg := nonFlags[0]
 		// Check if this is a known subcommand
 		if cmd, exists := c.subcommands[arg]; exists {
-			subcommandIndex = i
+			subcommandIndex = 0
 			subcmd = cmd
-			break
-		}
-
-		// If it's not a flag and not a subcommand:
-		// - If we have subcommands defined, this is an unknown command error
-		// - Otherwise, it's an argument - stop looking for subcommands
-		if len(c.subcommands) > 0 {
-			// We have subcommands but this doesn't match any
+		} else if len(c.subcommands) > 0 {
+			// It's not a subcommand and we have subcommands defined - this is an error
 			return &CommandNotFoundError{
 				Name: arg,
 				Cmd:  c,
 			}
 		}
-		break
+		// Otherwise it's an argument - continue with execution
 	}
 
 	// If we found a subcommand, delegate to it
 	if subcommandIndex >= 0 {
-		// Parse flags that appear before the subcommand (belong to current command)
-		beforeSubcmd := args[:subcommandIndex]
-		afterSubcmd := args[subcommandIndex+1:]
+		// Parse current command's flags
+		allFlags := c.getAllFlags()
+		tempFS := NewFlagSet()
+		for _, flag := range allFlags {
+			tempFS.flags = append(tempFS.flags, flag)
+		}
 
-		// Parse current command's flags from args before subcommand
-		if len(beforeSubcmd) > 0 {
-			allFlags := c.getAllFlags()
-			tempFS := NewFlagSet()
-			for _, flag := range allFlags {
-				tempFS.flags = append(tempFS.flags, flag)
-			}
-
-			_, err := tempFS.Parse(beforeSubcmd)
-			if err != nil {
-				return &FlagError{
-					Flag: "",
-					Msg:  err.Error(),
-					Cmd:  c,
-				}
+		_, err := tempFS.Parse(flags)
+		if err != nil {
+			return &FlagError{
+				Flag: "",
+				Msg:  err.Error(),
+				Cmd:  c,
 			}
 		}
 
-		// Execute subcommand with args after the subcommand name
-		return subcmd.execute(ctx, afterSubcmd)
+		// Execute subcommand with remaining non-flag args and all flags
+		remainingNonFlags := nonFlags[subcommandIndex+1:]
+		subArgs := append(flags, remainingNonFlags...)
+		return subcmd.execute(ctx, subArgs)
 	}
 
 	// No subcommand found, parse all flags and execute this command
