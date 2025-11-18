@@ -27,29 +27,48 @@ func (c *Command) ExecuteWithArgs(args []string) error {
 
 // execute is the internal execution logic
 func (c *Command) execute(ctx context.Context, args []string) error {
-	// Separate flags from non-flag arguments
-	var flags []string
-	var nonFlags []string
+	// First, find if there's a subcommand in the args (look at non-flag args only)
+	subcommandIndex := -1
+	var subcmd *Command
 
-	for _, arg := range args {
+	for i, arg := range args {
+		// Skip anything that looks like a flag
 		if strings.HasPrefix(arg, "-") {
-			flags = append(flags, arg)
-		} else {
-			nonFlags = append(nonFlags, arg)
+			continue
 		}
+
+		// Check if this is a known subcommand
+		if cmd, exists := c.subcommands[arg]; exists {
+			subcommandIndex = i
+			subcmd = cmd
+			break
+		}
+
+		// If it's not a flag and not a subcommand:
+		// - If we have subcommands defined BUT no arguments, this is an unknown command error
+		// - Otherwise, it's an argument - stop looking for subcommands
+		if len(c.subcommands) > 0 && len(c.args) == 0 {
+			return &CommandNotFoundError{
+				Name: arg,
+				Cmd:  c,
+			}
+		}
+		break
 	}
 
-	// Check for help flag first
+	// Check for help flag FIRST - before any parsing
 	if c.helpEnabled {
-		for _, flag := range flags {
-			if flag == "--"+c.helpFlag || flag == "-"+c.helpShort {
-				// Find which command the help is for by looking at non-flag args
+		for _, arg := range args {
+			if arg == "--"+c.helpFlag || arg == "-"+c.helpShort {
+				// Find which command the help is for
 				targetCmd := c
-				for _, a := range nonFlags {
-					if cmd, exists := targetCmd.subcommands[a]; exists {
-						targetCmd = cmd
-					} else {
-						break
+				for _, a := range args {
+					if !strings.HasPrefix(a, "-") {
+						if cmd, exists := targetCmd.subcommands[a]; exists {
+							targetCmd = cmd
+						} else {
+							break
+						}
 					}
 				}
 				targetCmd.showHelp()
@@ -58,48 +77,42 @@ func (c *Command) execute(ctx context.Context, args []string) error {
 		}
 	}
 
-	// Find if there's a subcommand in the non-flag args
-	subcommandIndex := -1
-	var subcmd *Command
-
-	if len(nonFlags) > 0 {
-		arg := nonFlags[0]
-		// Check if this is a known subcommand
-		if cmd, exists := c.subcommands[arg]; exists {
-			subcommandIndex = 0
-			subcmd = cmd
-		} else if len(c.subcommands) > 0 {
-			// It's not a subcommand and we have subcommands defined - this is an error
-			return &CommandNotFoundError{
-				Name: arg,
-				Cmd:  c,
-			}
-		}
-		// Otherwise it's an argument - continue with execution
-	}
-
-	// If we found a subcommand, delegate to it
+	// If we found a subcommand, delegate to it with remaining args
 	if subcommandIndex >= 0 {
-		// Parse current command's flags
-		allFlags := c.getAllFlags()
-		tempFS := NewFlagSet()
-		for _, flag := range allFlags {
-			tempFS.flags = append(tempFS.flags, flag)
-		}
+		// Collect args before and after subcommand
+		beforeSubcmd := args[:subcommandIndex]
+		afterSubcmd := args[subcommandIndex+1:]
 
-		_, err := tempFS.Parse(flags)
-		if err != nil {
-			return &FlagError{
-				Flag: "",
-				Msg:  err.Error(),
-				Cmd:  c,
+		// Get all flags for current command (including inherited)
+		allFlags := c.getAllFlags()
+
+		// Parse flags from BEFORE subcommand only (those belong to parent)
+		if len(beforeSubcmd) > 0 {
+			tempFS := NewFlagSet()
+			for _, flag := range allFlags {
+				tempFS.flags = append(tempFS.flags, flag)
+			}
+
+			remaining, err := tempFS.Parse(beforeSubcmd)
+			if err != nil {
+				return &FlagError{
+					Flag: "",
+					Msg:  err.Error(),
+					Cmd:  c,
+				}
+			}
+
+			// If there are remaining non-flag args before subcommand, that's an error
+			if len(remaining) > 0 {
+				return &CommandNotFoundError{
+					Name: remaining[0],
+					Cmd:  c,
+				}
 			}
 		}
 
-		// Execute subcommand with remaining non-flag args and all flags
-		remainingNonFlags := nonFlags[subcommandIndex+1:]
-		subArgs := append(flags, remainingNonFlags...)
-		return subcmd.execute(ctx, subArgs)
+		// Execute subcommand with args after the subcommand name
+		return subcmd.execute(ctx, afterSubcmd)
 	}
 
 	// No subcommand found, parse all flags and execute this command
